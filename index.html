@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Wasm f32 argument becomes NaN after a JS tail call</title>
+</head>
+<body>
+<pre id="out">Running…</pre>
+<script type="module">
+// See repro.wat. Chain under test:
+//   Wasm trigger(x) --calls import--> JS imp(x) --tail call--> Wasm bitsOf(x: f32)
+// Expected: bitsOf(x) returns the f32 bits of x. On Safari 27.2 RC, after warm-up, the tail call
+// delivers NaN (0xffe00000) for x = 0 and x = 1.
+
+// Use `wat2wasm repro.wat -o repro.wasm`
+const module = await WebAssembly.compileStreaming(fetch('repro.wasm'));
+
+// Two instances of the same module. They differ only in how the imported JS function calls back
+// into the instance's bitsOf export. Module code is strict mode, so `return bitsOf(x)` is a tail call.
+let tailBitsOf, nonTailBitsOf;
+function tailCall(x) { return tailBitsOf(x); }
+function nonTailCall(x) { const r = nonTailBitsOf(x); return r; }
+
+const tail = (await WebAssembly.instantiate(module, { m: { imp: tailCall } })).exports;
+const nonTail = (await WebAssembly.instantiate(module, { m: { imp: nonTailCall } })).exports;
+tailBitsOf = tail.bitsOf;
+nonTailBitsOf = nonTail.bitsOf;
+
+const hex = v => '0x' + (v >>> 0).toString(16).padStart(8, '0');
+
+function report(label) {
+    const lines = [label];
+    for (const x of [0, 1, 2, 1000]) {
+        const t = tail.trigger(x); // fails for 0 and 1 after warmup, passes for other values
+        const n = nonTail.trigger(x);
+        lines.push(`  x=${x}: non-tail call ${hex(n)}, tail call ${hex(t)}${t === n ? '' : '  <-- NaN - WRONG'}`);
+    }
+    return lines.join('\n');
+}
+
+const before = report('Before warm-up:');
+
+for (let i = 0; i < 100000; i++) { // let trigger tier up
+    tail.trigger(7); 
+    nonTail.trigger(7); 
+} 
+const after = report('After 100000 calls:');
+
+document.getElementById('out').textContent = `${navigator.userAgent}\n\n${before}\n\n${after}`;
+console.log(document.getElementById('out').textContent);
+
+</script>
+</body>
+</html>
